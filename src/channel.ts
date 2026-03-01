@@ -1,9 +1,29 @@
+import { join } from "node:path";
+import { homedir } from "node:os";
 import { getPinclawWsServer, setPinclawWsServer } from "./runtime.js";
 import { PinclawWsServer } from "./ws-server.js";
-import type { ResolvedPinclawAccount, PinclawAccountConfig } from "./types.js";
+import { RelayClient } from "./relay-client.js";
+import type { ResolvedPinclawAccount, PinclawAccountConfig, RelayConfig } from "./types.js";
 
 const DEFAULT_WS_PORT = 18790;
 const DEFAULT_ACCOUNT_ID = "default";
+
+// ── Delivery tag parsing ──
+// Cron messages can carry a [DELIVERY:TYPE] prefix to control routing.
+// Tags are stripped before forwarding to the device.
+
+type DeliveryType = "notify" | "silent" | "result";
+
+const DELIVERY_TAG_RE = /^\[DELIVERY:(NOTIFY|SILENT|RESULT)\]\s*/i;
+const NO_REPLY_RE = /\[NO_REPLY\]/i;
+
+function parseDeliveryTag(text: string): { type: DeliveryType; text: string; hasNoReply: boolean } {
+  const m = text.match(DELIVERY_TAG_RE);
+  if (!m) return { type: "notify", text, hasNoReply: false };
+  const type = m[1].toLowerCase() as DeliveryType;
+  const stripped = text.slice(m[0].length);
+  return { type, text: stripped, hasNoReply: NO_REPLY_RE.test(stripped) };
+}
 
 export const pinclawPlugin = {
   id: "pinclaw" as const,
@@ -69,7 +89,6 @@ export const pinclawPlugin = {
 
   // ── Outbound adapter (agent → hardware device) ──
   // OpenClaw's announce/cron pipeline calls sendText/sendMedia to deliver messages.
-  // Returns OutboundDeliveryResult { channel, messageId } as required by createPluginHandler().
 
   outbound: {
     deliveryMode: "direct" as const,
@@ -79,19 +98,20 @@ export const pinclawPlugin = {
       const server = getPinclawWsServer();
       const msgId = `pinclaw-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const deviceId = ctx.to || "pinclaw";
-      console.log(`[pinclaw outbound] sendText to=${deviceId} text=${(ctx.text ?? "").slice(0, 80)}...`);
+      const delivery = parseDeliveryTag(ctx.text ?? "");
+
+      if (delivery.type === "silent") {
+        console.log(`[pinclaw outbound] SILENT — skipped sendText to=${deviceId} text=${delivery.text.slice(0, 80)}...`);
+        return { channel: "pinclaw" as const, messageId: msgId };
+      }
+      if (delivery.type === "result" && delivery.hasNoReply) {
+        console.log(`[pinclaw outbound] RESULT+NO_REPLY — skipped sendText to=${deviceId}`);
+        return { channel: "pinclaw" as const, messageId: msgId };
+      }
+
+      console.log(`[pinclaw outbound] sendText (${delivery.type}) to=${deviceId} text=${delivery.text.slice(0, 80)}...`);
       if (server) {
-        // Route through Pinclaw session AI for voice compression,
-        // then push to hardware. This handles cron announce results —
-        // the AI applies SOUL + voice rules before speaking to the user.
-        try {
-          const result = await server.relayToDevice(deviceId, ctx.text, "announce");
-          console.log(`[pinclaw outbound] relayToDevice result: ok=${result.ok} queued=${result.queued}`);
-        } catch (err: any) {
-          // Fallback: if relay fails (e.g. Gateway down), push raw text directly
-          console.log(`[pinclaw outbound] relay failed (${err.message}), falling back to direct push`);
-          await server.sendToDevice(deviceId, ctx.text);
-        }
+        await server.sendToDevice(deviceId, delivery.text);
       } else {
         console.log(`[pinclaw outbound] NO server instance — message lost!`);
       }
@@ -102,13 +122,20 @@ export const pinclawPlugin = {
       const server = getPinclawWsServer();
       const msgId = `pinclaw-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const deviceId = ctx.to || "pinclaw";
-      const text = ctx.mediaUrl ? `${ctx.text}\n[media: ${ctx.mediaUrl}]` : ctx.text;
+      const delivery = parseDeliveryTag(ctx.text ?? "");
+
+      if (delivery.type === "silent") {
+        console.log(`[pinclaw outbound] SILENT — skipped sendMedia to=${deviceId}`);
+        return { channel: "pinclaw" as const, messageId: msgId };
+      }
+      if (delivery.type === "result" && delivery.hasNoReply) {
+        console.log(`[pinclaw outbound] RESULT+NO_REPLY — skipped sendMedia to=${deviceId}`);
+        return { channel: "pinclaw" as const, messageId: msgId };
+      }
+
+      const text = ctx.mediaUrl ? `${delivery.text}\n[media: ${ctx.mediaUrl}]` : delivery.text;
       if (server) {
-        try {
-          await server.relayToDevice(deviceId, text, "announce");
-        } catch {
-          await server.sendToDevice(deviceId, text);
-        }
+        await server.sendToDevice(deviceId, text);
       }
       return { channel: "pinclaw" as const, messageId: msgId };
     },
@@ -179,11 +206,39 @@ export const pinclawPlugin = {
         `Pinclaw WebSocket server started on port ${account.wsPort}`,
       );
 
+      // Start relay client if configured
+      let relayClient: RelayClient | null = null;
+      const relayConfig: RelayConfig | undefined =
+        account.config.relay ??
+        (process.env.PINCLAW_RELAY_TOKEN
+          ? { enabled: true, token: process.env.PINCLAW_RELAY_TOKEN, url: process.env.PINCLAW_RELAY_URL }
+          : undefined);
+
+      if (relayConfig?.enabled && relayConfig?.token) {
+        const relayUrl = relayConfig.url || "wss://api.pinclaw.ai";
+        relayClient = new RelayClient({
+          relayToken: relayConfig.token,
+          relayUrl,
+          localPluginPort: account.wsPort,
+          localGatewayPort: gatewayPort,
+          log: ctx.log
+            ? {
+                info: (...args: any[]) => ctx.log.info("[relay]", ...args),
+                warn: (...args: any[]) => ctx.log.warn("[relay]", ...args),
+                error: (...args: any[]) => ctx.log.error("[relay]", ...args),
+              }
+            : undefined,
+        });
+        await relayClient.start();
+        ctx.log?.info(`Relay client started → ${relayUrl}`);
+      }
+
       // Block until abort signal fires (keeps gateway alive)
       return new Promise<void>((resolve) => {
         ctx.abortSignal.addEventListener(
           "abort",
           () => {
+            relayClient?.stop();
             server.stop();
             setPinclawWsServer(null);
             ctx.setStatus({

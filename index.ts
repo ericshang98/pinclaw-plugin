@@ -2,8 +2,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { pinclawPlugin } from "./src/channel.js";
-import { setPinclawRuntime } from "./src/runtime.js";
-import type { DeviceToolDef } from "./src/types.js";
+import { setPinclawRuntime, getPinclawWsServer } from "./src/runtime.js";
+import type { DeviceToolDef, DeviceSkillManifest, ContextHint } from "./src/types.js";
 
 // ── Default Pinclaw Soul ──
 // Embedded as fallback; user can override via iOS Settings → SOUL.md editor
@@ -78,33 +78,7 @@ function loadSoulContent(): string {
   return DEFAULT_PINCLAW_SOUL;
 }
 
-function buildDeviceToolsContext(tools: DeviceToolDef[]): string {
-  if (tools.length === 0) return "";
-
-  const toolLines = tools.map(t => {
-    const paramDesc = t.parameters.length > 0
-      ? ` (params: ${t.parameters.map(p => `${p.name}: ${p.type}${p.required === false ? "?" : ""}`).join(", ")})`
-      : "";
-    return `- ${t.name}: ${t.description}${paramDesc}`;
-  }).join("\n");
-
-  return `
-## Device Tools (iPhone-side tools)
-The user's iPhone provides these tools. To use one, output:
-<device_tool name="tool_name" params='{"key":"value"}'/>
-
-Available tools:
-${toolLines}
-
-Rules:
-- If a tool returns permission error, tell the user to enable it in the Skills tab.
-- Only call one tool at a time. Wait for the result before calling another.
-- After receiving tool results, compose a natural response for the user.
-`;
-}
-
-function buildPinclawSystemContext(deviceId: string, deviceTools?: DeviceToolDef[]): string {
-  const toolsContext = deviceTools ? buildDeviceToolsContext(deviceTools) : "";
+function buildPinclawSystemContext(deviceId: string): string {
   return `## Pinclaw Hardware Session
 
 You are the user's hardware AI assistant, running on a wearable device (ID: ${deviceId}).
@@ -131,54 +105,20 @@ This is the hardware session — the user talks to you through a clip with mic, 
 - Normal conversation where you already have context — just reply directly
 - Don't proactively dump other sessions' data unless asked
 
-**CRITICAL — Response Format:**
-NEVER use the tts tool or message tool. All voice output goes through the device.
-Wrap EVERY reply in exactly ONE of these three XML modes:
-
-1. **sound** — confirmations, task done, errors. No speech, just a tone.
-   <mode>sound</mode><sound>taskSuccess</sound><display>已设置1分钟后提醒</display>
-   Available sounds: taskSuccess, taskFailure, notifyArrive, confirmNeeded
-
-2. **voice** — short conversational replies. TTS reads aloud.
-   <mode>voice</mode><voice>现在18度，适合出门</voice>
-   Rules: ≤15 Chinese characters or ≤12 English words. No emoji/symbols/markdown.
-
-3. **display** — information-dense replies. Short voice hint + full content on screen.
-   <mode>display</mode><voice>看一下手机</voice><display>北京明天：晴，12-22°C，北风3级。适合户外活动，建议带件薄外套。</display>
-   Voice hint must be ≤8 Chinese characters or ≤6 English words.
-
-**Mode Selection Guide:**
-- Reminder set / task done / confirmed → sound (taskSuccess)
-- Failed / error → sound (taskFailure)
-- Simple Q&A, time, short answer → voice
-- Weather, lists, explanations, config, anything > 15 chars → display
-
-**General rules:**
-- Match the user's language exactly
-- NEVER repeat what the user said
-- No filler words
-
-**Cross-session notifications ([来自xxx的结果]):**
-Messages prefixed with [来自xxx的结果] are one-way notifications from background tasks (Cron, Main session).
-This is NOT a conversation — do NOT ask follow-up questions, do NOT write to memory/files, do NOT use tools.
-Reply with ONLY ONE XML response. Extract the single most actionable conclusion.
-
-Rules:
-1. MUST use XML format. Never output plain text.
-2. Result fits ≤15 Chinese chars → voice mode: <mode>voice</mode><voice>结论</voice>
-3. Result too long for voice → display mode: <mode>display</mode><voice>≤8字提示</voice><display>精简内容</display>
-4. NEVER repeat raw data. Extract the conclusion the user needs to act on.
-5. NEVER use exec, web_search, sessions_*, or any tool. Just compress and reply.
-
-Examples:
-- [来自cron的结果] 健康提醒：该喝水了 → <mode>voice</mode><voice>该喝水了</voice>
-- [来自main的结果] CA1234 07:20 ¥680, MU5678 09:00 ¥520 → <mode>voice</mode><voice>最早航班7点20</voice>
-- [来自cron的结果] 天气变化：北京今晚暴雨预警，气温骤降10度 → <mode>display</mode><voice>今晚暴雨</voice><display>暴雨预警，气温骤降10度，记得带伞和外套</display>
+**Your role as the Thinking layer:**
+- You are the thinking and reasoning engine. A separate voice layer (Pre-Speak) handles the first quick response to the user.
+- The user message may contain a [Pre-Speak] tag showing what the voice layer already told the user. Don't repeat what Pre-Speak said — focus on adding new information.
+- If you use tools (cron, exec, web_search), include the result and your interpretation.
+- For cross-session notifications ([来自xxx的结果]): extract the key conclusion in 1-2 sentences. Do NOT use tools, do NOT ask follow-up questions.
+- Be thorough for complex questions. Be brief for simple ones.
+- Match the user's language.
 
 **Reminders/scheduling:**
 All reminders go through the cron tool. See TOOLS.md for exact parameters.
-After creating a cron job, confirm with:
-<mode>sound</mode><sound>taskSuccess</sound><display>已设置提醒</display>
+ALWAYS output the confirmation XML FIRST, then call the cron tool:
+1. Output: <mode>sound</mode><sound>taskSuccess</sound><display>已设置X分钟后提醒</display>
+2. Then call exec to run the cron command
+The user hears the confirmation immediately while the cron job is set up in the background.
 
 **Proactive monitoring via HEARTBEAT.md:**
 You can write tasks to your workspace HEARTBEAT.md file for periodic self-check.
@@ -188,7 +128,116 @@ The gateway reads this file every heartbeat cycle and wakes you to process it.
 - Format: one task per line, plain text
 - When all items are handled or no action needed, respond with HEARTBEAT_OK (silent, user won't hear it)
 - Only speak to the user when you have something genuinely useful to say
-${toolsContext}`;
+`;
+}
+
+// ── Device Skills 3-state context builder ──
+
+function buildDeviceSkillsContext(data: {
+  skills: DeviceSkillManifest[];
+  connected: boolean;
+  lastSeen: string | null;
+}): string {
+  const { skills, connected, lastSeen } = data;
+  if (skills.length === 0) return "";
+
+  if (connected) {
+    // ── Connected: full tool calling format ──
+    const availableSkills = skills.filter(s => s.enabled && s.permission === "authorized");
+    const disabledSkills = skills.filter(s => !s.enabled || s.permission !== "authorized");
+
+    let out = "";
+
+    if (availableSkills.length > 0) {
+      const toolLines = availableSkills.flatMap(s => s.tools.map(t => {
+        const paramDesc = t.parameters.length > 0
+          ? ` (params: ${t.parameters.map(p => `${p.name}: ${p.type}${p.required === false ? "?" : ""}`).join(", ")})`
+          : "";
+        return `- ${t.name}: ${t.description}${paramDesc}`;
+      })).join("\n");
+
+      out += `
+## Device Tools (iPhone-side tools)
+The user's iPhone is connected and provides these tools. To use one, output:
+<device_tool name="tool_name" params='{"key":"value"}'/>
+
+Available tools:
+${toolLines}
+
+Rules:
+- If a tool returns permission error, tell the user to enable it in the Skills tab.
+- Only call one tool at a time. Wait for the result before calling another.
+- After receiving tool results, compose a natural response for the user.
+`;
+    }
+
+    if (disabledSkills.length > 0) {
+      const disabledLines = disabledSkills.map(s => {
+        const reason = s.permission !== "authorized" ? `permission: ${s.permission}` : "disabled by user";
+        const toolNames = s.tools.map(t => t.name).join(", ");
+        return `- ${s.name} (${reason}): ${toolNames}`;
+      }).join("\n");
+
+      out += `
+## Disabled Device Skills
+These skills exist on the user's iPhone but are currently unavailable:
+${disabledLines}
+Do NOT attempt to call tools from disabled skills. If the user asks for something that requires a disabled skill, explain that they need to enable it in the Pinclaw app's Skills tab.
+`;
+    }
+
+    return out;
+  } else {
+    // ── Offline: informational only, no tool calling ──
+    const enabledSkills = skills.filter(s => s.enabled && s.permission === "authorized");
+    const disabledSkills = skills.filter(s => !s.enabled || s.permission !== "authorized");
+
+    let timeAgo = "";
+    if (lastSeen) {
+      const diffMs = Date.now() - new Date(lastSeen).getTime();
+      const diffMin = Math.floor(diffMs / 60000);
+      if (diffMin < 60) timeAgo = `${diffMin}m ago`;
+      else if (diffMin < 1440) timeAgo = `${Math.floor(diffMin / 60)}h ago`;
+      else timeAgo = `${Math.floor(diffMin / 1440)}d ago`;
+    }
+
+    let out = `
+## Device Skills (iPhone offline)
+The user's iPhone is not currently connected. Device tools are NOT available right now.
+${timeAgo ? `Last connected: ${timeAgo}` : ""}
+
+Known device capabilities:
+`;
+
+    if (enabledSkills.length > 0) {
+      out += "Enabled: " + enabledSkills.map(s => `${s.name} (${s.tools.map(t => t.name).join(", ")})`).join("; ") + "\n";
+    }
+    if (disabledSkills.length > 0) {
+      out += "Disabled: " + disabledSkills.map(s => s.name).join(", ") + "\n";
+    }
+
+    out += `
+If the user asks for something that requires a device tool, let them know their iPhone needs to be connected to the Pinclaw app.
+`;
+    return out;
+  }
+}
+
+function buildContextHintsBlock(hints: ContextHint[], staleNote?: string): string {
+  if (hints.length === 0) return "";
+
+  const lines = hints.map(h => {
+    const time = new Date(h.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const stale = staleNote ? ` ${staleNote}` : "";
+    return `### ${h.skill}\n${h.summary}\n_(updated ${time}${stale})_`;
+  }).join("\n\n");
+
+  return `
+## Device Context (auto-pushed from iPhone)
+${lines}
+
+Note: This is passive context from the user's device. Do NOT proactively recite this info. Only reference it when relevant to the user's question.
+`;
 }
 
 const plugin = {
@@ -204,18 +253,44 @@ const plugin = {
     setPinclawRuntime(api.runtime);
     api.registerChannel({ plugin: pinclawPlugin });
 
-    // Inject pinclaw soul + voice rules for hardware sessions
+    // Hook 1: Inject soul + system context for the pinclaw hardware session
     api.registerHook("before_prompt_build", (event: any, ctx: any) => {
       if (ctx.sessionKey !== "pinclaw") return;
 
-      const deviceId = "pinclaw";
       const soul = loadSoulContent();
-      const techRules = buildPinclawSystemContext(deviceId);
+      const techRules = buildPinclawSystemContext("pinclaw");
 
       return {
         prependContext: `${soul}\n\n---\n\n${techRules}`,
       };
     }, { name: "pinclaw-voice-context", description: "Inject soul personality + voice output rules for Pinclaw hardware sessions" });
+
+    // Hook 2: Inject device skills + context hints into ALL sessions (3-state: connected/offline/none)
+    api.registerHook("before_prompt_build", (event: any, ctx: any) => {
+      const wsServer = getPinclawWsServer();
+
+      // Device skills: prefer live, fallback to persisted
+      const skillData = wsServer?.getDeviceSkillsForPrompt() ?? null;
+      const skillsContext = skillData ? buildDeviceSkillsContext(skillData) : "";
+
+      // Context hints: prefer live, fallback to persisted
+      let contextHints = wsServer?.getAllContextHints() ?? [];
+      let staleNote: string | undefined;
+      if (contextHints.length === 0) {
+        contextHints = wsServer?.getPersistedContextHints() ?? [];
+        if (contextHints.length > 0) staleNote = "(device offline, may be stale)";
+      }
+      const hintsContext = buildContextHintsBlock(contextHints, staleNote);
+
+      // Server tools: auto-discovered tools from plugin/src/tools/
+      const serverToolsContext = wsServer?.getServerToolsForPrompt() ?? "";
+
+      if (!skillsContext && !hintsContext && !serverToolsContext) return;
+
+      return {
+        prependContext: skillsContext + hintsContext + serverToolsContext,
+      };
+    }, { name: "pinclaw-device-skills", description: "Inject iPhone device skills and context hints into all sessions" });
   },
 };
 

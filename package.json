@@ -1,18 +1,41 @@
 {
-  "name": "@openclaw/pinclaw",
+  "name": "pinclaw",
   "version": "0.1.0",
-  "description": "OpenClaw Pinclaw hardware voice interface channel plugin",
+  "description": "OpenClaw plugin for Pinclaw wearable AI voice assistant — connects hardware clip via iPhone to your OpenClaw Gateway",
   "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ericshang98/pinclaw-plugin.git"
+  },
+  "homepage": "https://pinclaw.ai",
+  "keywords": [
+    "openclaw",
+    "pinclaw",
+    "voice-assistant",
+    "wearable",
+    "ble",
+    "ai-hardware"
+  ],
+  "files": [
+    "index.ts",
+    "src/",
+    "openclaw.plugin.json"
+  ],
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
   "dependencies": {
+    "@deepgram/sdk": "^4.11.3",
     "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/ws": "^8.5.14",
     "tsx": "^4.21.0"
   },
-  "openclaw": {
-    "extensions": [
-      "./index.ts"
-    ]
+  "engines": {
+    "node": ">=18.0.0"
   }
 }

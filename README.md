@@ -13,18 +13,22 @@ Pinclaw Clip ──BLE──> iPhone App ──WebSocket──> [This Plugin] �
 
 ## What you need
 
-1. **Pinclaw hardware** — [pinclaw.ai](https://pinclaw.ai)
-2. **Pinclaw iOS app** — App Store (pairs with your clip via Bluetooth)
-3. **OpenClaw** — self-hosted or cloud, running in gateway mode
-4. **This plugin** — installed in your OpenClaw plugins directory
+1. **OpenClaw** — self-hosted, running in gateway mode
+2. **Pinclaw iOS app** — pairs with your clip via Bluetooth
+3. **Pinclaw hardware** — [pinclaw.ai](https://pinclaw.ai) (or use the BLE simulator for development)
 
 ## Install
 
 ```bash
+npm install pinclaw
+```
+
+Or install manually:
+
+```bash
 cd ~/.openclaw/plugins
 git clone https://github.com/ericshang98/pinclaw-plugin.git pinclaw
-cd pinclaw
-npm install
+cd pinclaw && npm install
 ```
 
 Then add to your `~/.openclaw/openclaw.json`:
@@ -47,7 +51,7 @@ Then add to your `~/.openclaw/openclaw.json`:
 Restart your OpenClaw gateway:
 
 ```bash
-openclaw gateway restart
+openclaw gateway --force
 ```
 
 The plugin starts automatically. You should see:
@@ -72,38 +76,93 @@ When you install this plugin, it automatically:
 
 | Feature | What it does |
 |---------|-------------|
-| **Pinclaw session** | Creates a dedicated `pinclaw` session in your OpenClaw with voice-optimized rules |
-| **Voice format** | Injects XML response format (voice/display/sound modes) so the AI responds in speech-friendly chunks |
-| **Personality** | Loads a default SOUL personality — concise, no filler, speed-first. You can customize it |
-| **Cron notifications** | Routes cron/announce results through the Pinclaw session AI, compresses them for voice, and pushes to your clip |
-| **Offline queue** | Queues messages when your clip is disconnected, delivers them when it reconnects |
-| **Device tools** | The iPhone app can register tools (contacts, location, etc.) that the AI can call |
+| **Voice interface** | Creates a hardware voice channel with speech-optimized AI responses |
+| **Personality** | Loads a default SOUL personality — concise, no filler, speed-first. Customizable via iPhone app or config |
+| **Device tools** | iPhone app registers tools (contacts, calendar, location, etc.) that the AI can call |
+| **Server tools** | Extensible tool registry — add your own server-side tools in `src/tools/` |
+| **Cron notifications** | Routes scheduled task results to your hardware clip |
+| **Cloud STT** | Optional Deepgram integration for higher-quality speech recognition |
+| **Interactive AI** | Play button for proactive AI check-ins |
+| **Remote access** | Optional cloud relay for accessing your plugin outside your LAN |
 
-### How notifications work
+## Configuration reference
 
-When a cron job or background task completes in another session, the result flows through the plugin:
+### openclaw.json
 
+| Key | Default | Description |
+|-----|---------|-------------|
+| `channels.pinclaw.enabled` | `true` | Enable/disable the plugin |
+| `channels.pinclaw.authToken` | `""` | Shared secret between server and iPhone app |
+| `channels.pinclaw.wsPort` | `18790` | WebSocket server port |
+| `notes.soul` | (built-in) | Custom AI personality |
+
+### Environment variables
+
+| Variable | Purpose | Required |
+|----------|---------|----------|
+| `DEEPGRAM_API_KEY` | Cloud speech-to-text (Deepgram) | No |
+| `AI_API_KEY` | Interactive AI (Play button) API key | No |
+| `AI_BASE_URL` | Interactive AI API endpoint | No |
+| `AI_LIGHT_MODEL` | Light model for Interactive AI (default: `kimi-k2`) | No |
+| `PINCLAW_RELAY_TOKEN` | Cloud relay authentication token | No |
+| `PINCLAW_RELAY_URL` | Cloud relay URL (default: `wss://api.pinclaw.ai`) | No |
+
+## HTTP API
+
+The plugin exposes these endpoints on the WebSocket port:
+
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/health` | GET | No | Health check (`{"ok": true}`) |
+| `/message` | POST | Yes | Send a text message |
+| `/devices` | GET | Yes | List connected devices |
+| `/cron/jobs` | GET | Yes | List cron jobs |
+| `/cron/jobs` | POST | Yes | Create a cron job |
+| `/cron/jobs/:id` | DELETE | Yes | Delete a cron job |
+| `/cron/jobs/:id/toggle` | POST | Yes | Enable/disable a cron job |
+| `/skills` | GET | Yes | List device skills |
+
+Auth: `Authorization: Bearer <authToken>` header.
+
+## Remote access
+
+**Option A: Cloud relay** (recommended)
+
+Set `PINCLAW_RELAY_TOKEN` in your environment. The plugin connects outbound to `wss://api.pinclaw.ai` and your iPhone connects through the relay — no port forwarding needed.
+
+**Option B: VPN / Tailscale**
+
+Connect your iPhone and server to the same VPN network. Point the app at your server's VPN IP.
+
+## Extending with server tools
+
+You can add custom server-side tools that the AI can invoke. See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
+
+Quick version: create a `.ts` file in `src/tools/`, export a `ServerToolDef`:
+
+```typescript
+import type { ServerToolDef } from "./types.js";
+
+const tool: ServerToolDef = {
+  name: "my_tool",
+  description: "Does something useful",
+  parameters: [
+    { name: "query", type: "string", required: true, description: "Search query" }
+  ],
+  async execute(params, context) {
+    // Your logic here
+    return JSON.stringify({ result: "done" });
+  },
+};
+
+export default tool;
 ```
-Cron result: "航班查询完成：CA1234 07:20 ¥680, MU5678 09:00 ¥520"
-                    │
-                    ▼
-        Plugin receives via outbound.sendText()
-                    │
-                    ▼
-        Routes to Pinclaw session AI (has voice rules)
-                    │
-                    ▼
-        AI compresses: <mode>voice</mode><voice>最早航班7点20</voice>
-                    │
-                    ▼
-        Pushes to hardware → you hear "最早航班7点20"
-```
 
-No setup needed — this works automatically once the plugin is installed.
+Tools are auto-discovered on startup. Files starting with `_` are ignored.
 
 ## Customize the personality
 
-The plugin ships with a default personality. To customize:
+The plugin ships with a default personality optimized for voice interaction. To customize:
 
 **Option A: Edit via iPhone app**
 Settings → Personality → Edit
@@ -118,59 +177,37 @@ Add to your `openclaw.json`:
 }
 ```
 
-The personality controls how the AI talks through the clip — tone, language, verbosity. The technical voice rules (XML format, character limits) are handled separately by the plugin and cannot be overridden.
-
-## Configuration reference
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `channels.pinclaw.enabled` | `true` | Enable/disable the plugin |
-| `channels.pinclaw.authToken` | `""` | Shared secret between server and iPhone app |
-| `channels.pinclaw.wsPort` | `18790` | WebSocket server port |
-| `notes.soul` | (built-in) | Custom AI personality |
-
-## HTTP endpoints
-
-The plugin exposes these endpoints on the WebSocket port:
-
-| Endpoint | Method | Auth | Description |
-|----------|--------|------|-------------|
-| `/health` | GET | No | Health check (`{"ok": true}`) |
-| `/message` | POST | Yes | Send a message (HTTP fallback when WS is down) |
-| `/notify` | POST | Yes | Push a notification from another session to the clip |
-| `/devices` | GET | Yes | List connected devices |
-| `/pending` | GET | Yes | Retrieve queued offline messages |
-| `/cron/jobs` | GET/POST | Yes | List or create cron jobs |
-| `/cron/jobs/:id` | DELETE | Yes | Delete a cron job |
-| `/cron/jobs/:id/toggle` | POST | Yes | Enable/disable a cron job |
-
-Auth: `Authorization: Bearer <authToken>` header or `token` field in request body.
-
-## Development
-
-### Run tests
-
-```bash
-npm install
-npx tsx test/pinclaw-server.test.ts
-```
-
-99 tests covering WebSocket protocol, HTTP endpoints, Gateway RPC, cron management, device tools, and offline queue.
-
-### Project structure
+## Project structure
 
 ```
-pinclaw/
-├── index.ts                      # Plugin entry — hooks, SOUL injection, voice rules
-├── openclaw.plugin.json          # OpenClaw plugin manifest
+pinclaw-plugin/
+├── index.ts                  # Plugin entry — hooks, SOUL injection
+├── openclaw.plugin.json      # OpenClaw plugin manifest
 ├── package.json
 ├── src/
-│   ├── ws-server.ts              # Core: WebSocket server + HTTP + Gateway RPC
-│   ├── channel.ts                # OpenClaw channel adapter (outbound, config, lifecycle)
-│   ├── types.ts                  # WebSocket protocol message types
-│   └── runtime.ts                # Global state (server instance ref)
-└── test/
-    └── pinclaw-server.test.ts    # Full test suite
+│   ├── channel.ts            # OpenClaw channel adapter
+│   ├── ws-server.ts          # Server factory export
+│   ├── runtime.ts            # Global state refs
+│   ├── types.ts              # WebSocket protocol types
+│   ├── interactive-ai.ts     # Interactive AI (Play button)
+│   ├── deepgram-stt.ts       # Deepgram cloud STT
+│   ├── relay-client.ts       # Cloud relay client
+│   ├── core/
+│   │   ├── server.ts         # Core WebSocket + HTTP server
+│   │   ├── ws-handler.ts     # WebSocket connection handler
+│   │   ├── http-router.ts    # HTTP API routes
+│   │   ├── gateway-rpc.ts    # OpenClaw Gateway RPC client
+│   │   ├── device-manager.ts # Device connection management
+│   │   ├── device-identity.ts# Device identity verification
+│   │   ├── ai-pipeline.ts    # AI call pipeline
+│   │   ├── cron-proxy.ts     # Cron job management
+│   │   ├── skills-crud.ts    # Device skills CRUD
+│   │   ├── version-check.ts  # Version check client
+│   │   └── utils.ts          # Shared utilities
+│   └── tools/
+│       ├── registry.ts       # Auto-discovery tool registry
+│       ├── types.ts          # ServerToolDef interface
+│       └── _example.ts       # Example tool (ignored by registry)
 ```
 
 ## FAQ
@@ -179,13 +216,13 @@ pinclaw/
 Yes. The iPhone handles Bluetooth communication with the clip, speech-to-text, and text-to-speech. The plugin is the server-side component.
 
 **Can I use this without the hardware?**
-The plugin runs fine without hardware connected (messages queue up). But without the clip + iPhone app, there's nothing to talk to.
+The plugin runs fine without hardware connected. You can use the BLE simulator (`swift peripheral_simulator.swift`) for development.
 
 **Does this work with any OpenClaw model?**
-Yes. The plugin works with whatever model your OpenClaw agent is configured to use. It just adds voice formatting rules to the responses.
+Yes. The plugin works with whatever model your OpenClaw agent is configured to use.
 
 **Can I use Pinclaw Cloud instead of self-hosting?**
-Yes. [pinclaw.ai](https://pinclaw.ai) offers a hosted service where you don't need to run OpenClaw yourself. This repo is for users who prefer to self-host.
+Yes. [pinclaw.ai](https://pinclaw.ai) offers a hosted service. This repo is for users who prefer to self-host.
 
 ## License
 
