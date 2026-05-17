@@ -303,8 +303,13 @@ const plugin = {
         root
           .command("login")
           .description("Link your OpenClaw to pinclaw.ai")
-          .action(async () => {
-            const result = await handlePinclawLogin(api);
+          .option("--email <email>", "pinclaw.ai account email")
+          .option("--password <password>", "pinclaw.ai account password")
+          .action(async (opts: { email?: string; password?: string }) => {
+            const result = await handlePinclawLogin(api, {
+              email: opts.email,
+              password: opts.password,
+            });
             console.log(result.text);
           });
 

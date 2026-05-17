@@ -24,24 +24,20 @@ import { handleHttpRequest } from "./http-router.js";
 import { callAgent } from "./ai-pipeline.js";
 import { InteractiveAI } from "../interactive-ai.js";
 // ACP is optional — excluded from npm package to avoid child_process security scan
-let AgentManager: any;
-try {
-  AgentManager = (await import("../acp/index.js")).AgentManager;
-} catch {
-  // Stub when ACP is not available (npm package distribution)
-  AgentManager = class {
-    async init() {}
-    stopAll() {}
-    listAvailable() {
-      return [];
-    }
-    resolve(_id: string) {
-      return null;
-    }
-    async *chat() {}
-    resetSession() {}
-  };
-}
+// Stub used when ACP is not available (npm package distribution)
+const AgentManagerStub = class {
+  async init() {}
+  stopAll() {}
+  listAvailable() {
+    return [];
+  }
+  resolve(_id: string) {
+    return null;
+  }
+  async *chat() {}
+  resetSession() {}
+};
+let AgentManager: any = AgentManagerStub;
 
 export interface PinclawWsServerOptions {
   port: number;
@@ -115,6 +111,14 @@ export class PinclawWsServer {
   // ── Lifecycle ──
 
   async start(): Promise<void> {
+    // Late-load ACP to avoid top-level await (breaks CJS require in OpenClaw)
+    try {
+      AgentManager = (await import("../acp/index.js")).AgentManager;
+      this.agentManager = new AgentManager(this.log);
+    } catch {
+      // ACP not available — keep stub
+    }
+
     // Discover and load server tools
     const currentDir = dirname(fileURLToPath(import.meta.url));
     const toolsDir = join(currentDir, "..", "tools");

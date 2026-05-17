@@ -1,6 +1,6 @@
 {
   "name": "pinclaw",
-  "version": "0.2.0",
+  "version": "0.2.6",
   "description": "OpenClaw Pinclaw hardware voice interface channel plugin",
   "repository": {
     "type": "git",

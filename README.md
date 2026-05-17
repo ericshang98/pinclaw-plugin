@@ -59,50 +59,48 @@ openclaw plugins install pinclaw --dangerously-force-unsafe-install
 <details>
 <summary>Why <code>--dangerously-force-unsafe-install</code>?</summary>
 
-OpenClaw's security scanner blocks plugins that use `child_process` or read environment variables combined with network requests. Pinclaw uses both for legitimate reasons:
+OpenClaw's security scanner blocks plugins that read environment variables combined with network requests. Pinclaw does this for legitimate reasons:
 
-- **`child_process`** — Local agent orchestration (ACP protocol)
 - **`process.env` + `fetch`** — Reading API keys (`IMAGE_API_KEY`, `TTS_API_KEY`) to call AI generation APIs
+- **`child_process`** — Auto-restarting the gateway after login
 
 This plugin is fully open source. Review the code here before installing if you have concerns.
 
 </details>
 
-### 2. Start the gateway
+### 2. Login
 
 ```bash
-openclaw gateway
+openclaw pinclaw login
 ```
 
-### 3. Link your account
+Enter your pinclaw.ai email and password. Everything else is automatic — relay configuration, gateway restart, and connection verification. You'll see `Relay connected!` when it's done.
 
-In the OpenClaw chat (web UI or terminal):
+You can also pass credentials directly:
 
+```bash
+openclaw pinclaw login --email you@example.com --password yourpassword
 ```
-/pinclaw login
-```
 
-This opens a browser window to sign in at [pinclaw.ai](https://pinclaw.ai). Once authenticated, the relay connection is auto-configured — your iPhone can reach your local OpenClaw from anywhere.
-
-### 4. Connect the app
+### 3. Connect the app
 
 Open the [Pinclaw iOS app](https://apps.apple.com/app/pinclaw/id6760344343), sign in with the same account, and you're connected.
 
 ### Verify
 
-```
-/pinclaw status
+```bash
+openclaw pinclaw status
 ```
 
-You should see relay: connected and your device listed.
+You should see relay: configured.
 
 ### CLI Commands
 
-| Command                   | Description                                                                   |
-| ------------------------- | ----------------------------------------------------------------------------- |
-| `openclaw pinclaw login`  | Link your OpenClaw to pinclaw.ai (also available as `/pinclaw login` in chat) |
-| `openclaw pinclaw status` | Show relay connection status                                                  |
-| `openclaw pinclaw logout` | Remove relay connection                                                       |
+| Command                   | Description                                                             |
+| ------------------------- | ----------------------------------------------------------------------- |
+| `openclaw pinclaw login`  | Sign in to pinclaw.ai, configure relay, restart gateway — all automatic |
+| `openclaw pinclaw status` | Show relay connection status                                            |
+| `openclaw pinclaw logout` | Remove relay connection                                                 |
 
 ## How It Works
 
